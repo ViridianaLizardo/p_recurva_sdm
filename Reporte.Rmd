@@ -1,0 +1,124 @@
+---
+title: "Reporte"
+output: html_notebook
+---
+```{r}
+library(tidyverse)
+library(gt)
+```
+
+
+# Hosts
+# Generar tabla
+```{r}
+especies_names<- c("Corymbia citriodora",
+                   "Eucalyptus camaldulensis",
+                   "Eucalyptus cinerea",
+                   "Eucalyptus globulus",
+                   "Eucalyptus robusta")
+
+```
+
+# Eval Host
+```{r}
+eval<- list.files('data/host_sdm/eval', full.names = T) %>% 
+  lapply(read.csv) %>% bind_rows() %>%
+  arrange(trained) %>% select(-iter)
+
+eval_gt <-
+  eval %>% mutate(across(where(is.numeric), round, 3)) %>%
+  setNames(c('Especie', 'Training', 'Testing', 'TSS', 'AUC',
+             'FC', 'Reg', 'Variables Utilizadas', 'Entrenamiento')) %>%
+  relocate(c(TSS, AUC), .before = 'Variables Utilizadas') %>%
+  group_by(Entrenamiento) %>% group_split() 
+```
+
+
+```{r}
+tb1<- eval_gt[[1]] %>%
+  select(-Entrenamiento) %>%
+  gt(row_group_as_column = F ) %>%
+  tab_spanner(
+    label = "Puntos de registro",
+    columns = c(Training, Testing)) %>%
+  tab_spanner(
+    label = "Parámetros",
+    columns = c('FC','Reg'))%>%
+  tab_spanner(
+    label = "Evaluación",
+    columns = c('TSS', 'AUC')) %>%
+  tab_header(title = md('Características de modelos de distribución de especies hospederas de P. recurvata entrenados en área invadida') )
+
+tb2 <- eval_gt[[2]] %>%
+  select(-Entrenamiento) %>%
+  gt(row_group_as_column = F ) %>%
+  tab_spanner(
+    label = "Puntos de registro",
+    columns = c(Training, Testing)) %>%
+  tab_spanner(
+    label = "Parámetros",
+    columns = c('FC','Reg'))%>%
+  tab_spanner(
+    label = "Evaluación",
+    columns = c('TSS', 'AUC')) %>%
+  tab_header(title = md('Características de modelos de distribución de especies hospederas de P. recurvata entrenados en área nativa') ) 
+```
+
+# Beetle
+## Eval
+```{r}
+eval_ph<- list.files('data/sdm/eval', full.names = T) %>% 
+  lapply(read.csv) %>% bind_rows() %>%
+  arrange(trained) %>% select(-iter, -species) 
+
+eval_ph_gt <- eval_ph %>% mutate(across(where(is.numeric), round, 3)) %>%
+  setNames(c('Training', 'Testing',  'TSS', 'AUC',
+             'FC', 'Reg', 'Variables Utilizadas', 'Entrenamiento')) %>%
+  relocate(c(TSS, AUC), .before = 'Variables Utilizadas') %>%
+  mutate(Entrenamiento = str_to_sentence(Entrenamiento))
+```
+
+## Thresholds
+```{r}
+eval_ph_gt2 <-  list.files('data/sdm/Thresholds', full.names = T) %>% 
+  lapply(read.csv) %>% bind_rows() %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  filter(Threshold== 'Maximum training sensitivity plus specificity') %>%
+  mutate(Entrenamiento =c('America_tr','Native_tr')) %>%
+  select(Cloglog.value, Fractional.predicted.area, P.values,Entrenamiento) %>%
+  setNames(c('Valor cloglog', '% de área predicha', 'P', 'Entrenamiento')) %>%
+  left_join(eval_ph_gt, .) %>%
+  relocate(Entrenamiento, .before = everything())
+  
+```
+
+
+## eval
+```{r}
+tb3<- eval_ph_gt2 %>%
+  gt() %>%
+  tab_spanner(
+    label = "Puntos de registro",
+    columns = c(Training, Testing)) %>%
+  tab_spanner(
+    label = "Parámetros",
+    columns = c('FC','Reg'))%>%
+  tab_spanner(
+    label = "Evaluación",
+    columns = c('TSS', 'AUC'))  %>%
+    tab_spanner(
+    label = "Umbral",
+    columns = c('Valor cloglog', '% de área predicha', 'P'))  %>%
+  tab_header(title = md('Características de modelos de distribución de especies P. recurvata')) 
+```
+
+
+## thresholds
+
+#Group and save
+```{r}
+gt_group(tb1, tb2, tb3) %>% gtsave('reports/tables_sdm.docx')
+gt_group(tb1, tb2, tb3) %>% gtsave('reports/tables_sdm.rtf')
+gt_group(tb1, tb2, tb3)
+```
+

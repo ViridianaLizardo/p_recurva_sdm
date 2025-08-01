@@ -1,0 +1,943 @@
+---
+title: "Datos de Myrtaceae hospederos de Phoracantha"
+author: "Viridiana Lizardo"
+output: html_notebook
+---
+
+# Introduction
+
+This R Notebook downloads occurrence data for Eucalyptus host species, processes environmental data, and runs species distribution models (SDMs) to make a raster layer with host species richness.
+
+# Load Required Libraries
+
+```{r}
+library(tidyverse)
+library(rgbif)
+library(sf)
+library(terra)
+library(tmap)
+library(kewr)
+library(WorldFlora)
+library(CoordinateCleaner)
+library(ggplot2)
+library(SDMtune)
+library(geodata)
+library(usdm)
+source('C:/Users/USER/OneDrive - UNIVERSIDAD NACIONAL AUTÓNOMA DE MÉXICO/R projects/theme_virix.r')
+sf_use_s2(use_s2 = F)
+data(borders)
+#WFO.remember(WFO.file = 'D:/R_spatial/data/WFO_v2024_06_classification.csv')
+```
+
+# Step 1. Taxonomy harmonization using GBIF amd Kew Names Matching Service
+
+```{r}
+eu_taxonomy<- name_backbone_checklist(c('Eucalyptus camaldulensis Dehnhardt',
+                          'Eucalyptuscinerea F. Müller ex Bentham',
+                          'Eucalyptus citriodora Hooker',
+                          'Eucalyptus cloeziana F. Müller',
+                          'Eucalyptus drepanophylla F. Müller ex Bentham',
+                          'Eucalyptus globulus Labillardiére',
+                          'Eucalyptus grandis W. Hill ex Maiden',
+                          'Eucalyptus intermedia R. T. Baker',
+                          'Eucalyptus maculata Hooker',
+                          'Eucalyptus nova-anglica Deane & Maiden',
+                          'Eucalyptus ovata Labillardière',
+                          'Eucalyptus robusta Smith',
+                          'Eucalyptus saligna Smith',
+                          'Eucalyptus sideroxylon Cunnigham ex Woolls',
+                          'Eucalyptus tereticornis Smith',
+                          'Eucalyptus viminalis Labillardière')) %>% select(family, genus, species,scientificName, speciesKey)
+
+
+
+eu_taxonomy<-  eu_taxonomy%>%  pull(species) %>% kewr::match_knms() %>% tidy() %>%
+  rename(species = submitted) %>% 
+  select(species, ipni_id, matched_record) %>%left_join(eu_taxonomy, .)
+```
+
+## Merge with the International Plant Names Index (IPNI)
+
+IPNI provides nomenclatural data (spelling, author, types and first place/date of publication) for the scientific names of vascular plants from family to infraspecific ranks.
+
+```{r}
+# Lookup IPNI IDs in World Flora Online (WFO) and clean the data
+eu_taxonomy <- eu_taxonomy %>% 
+  pull(ipni_id) %>%                 # Extract IPNI IDs
+  lapply(lookup_ipni) %>%           # Look up each ID in IPNI
+  lapply(tidy) %>%                  # Clean up the returned data
+  bind_rows() %>%                   # Combine results into a single data frame
+  select(distribution, wfoId) %>%    # Keep only relevant columns
+  cbind(eu_taxonomy, .)              # Merge back with original taxonomy data
+
+# Merge with WFO dataset to get additional taxonomic information
+eu_taxonomy_final <- WFO.data %>%
+  filter(taxonID %in% eu_taxonomy$wfoId) %>% # Keep only matching taxa
+  select(taxonID, scientificName, nomenclaturalStatus, taxonRemarks) %>%
+  rename(
+    WFO_name = scientificName,  # Rename columns for clarity
+    wfoId = taxonID
+  ) %>%
+  left_join(eu_taxonomy)         # Merge with previously processed taxonomy data
+```
+
+
+
+# Training area World Geographical Scheme for Recording Plant Distributions
+
+Distribución de las plantas hospederas basado en el *World Geographical Scheme for Recording Plant Distributions*, utilizando el nivel. Se obtiene a partir de los datos presentes en la base de datos de *Plants of the world* através del paquete `kewr`.
+
+Published for the International Working Group on Taxonomic Databases For Plant Sciences (TDWG). Downloaded from [here](%5B)<https://github.com/tdwg/wgsrpd/tree/master>.
+
+## Data
+
+### Geographical Administrative Areas (GADM)
+
+```{r}
+borders <- read_rds(file = 'data/gadm/gadm36_adm0_r3_pk.rds') %>% terra::unwrap() %>% st_as_sf() %>% select(NAME_0) %>% rename(NAME = NAME_0) %>%
+  left_join(country_codes()) %>% select(NAME:ISO2, UNREGION1:continent)
+```
+
+### World Geographical Scheme for Recording Plant Distributions (WGSRPD)
+
+WGSRPD provides an agreed system of geographical units at approximately “country” level and upwards for use in recording plant distributions. The system offered covers the whole world and identifies units at four levels:
+
+1.  Continental
+
+2.  Regional (or subcontinental)
+
+3.  “Botanical Country” level (which may often ignore purely political considerations)
+
+4.  “Basic Recording Units” where political integrity is fully recognised.
+
+```{r}
+tdwg <- st_read('data/wgsrpd-master/level3') 
+
+```
+
+### Load WorldClim data at 2.5 arcsec resolution
+
+```{r}
+wc_2.5 <- list.files('D:/R_spatial/data/Environmental/WorldClim/2.5m',full.names = T) %>% str_subset('topo', negate = T) %>% rast()
+
+
+```
+
+## Function to Retrieve Native and Introduced Distribution from POWO
+This function queries POWO (Plants of the World Online) to obtain native and introduced distribution records for a given species.
+
+```{r}
+get_distribution <- function(x) {
+  # Query POWO for distribution data and tidy the output
+  res_powo <- lookup_powo(x, distribution = TRUE) %>%
+    tidy() %>%
+    select(distribution) %>%
+    unnest(cols = distribution)
+  
+  cat(paste0(x, '\n'))  # Print species name for tracking progress
+  
+  # Check if the species has introduced records
+  if ('introduced' %in% names(res_powo)) {
+    # Extract introduced distribution
+    intro <- res_powo %>%
+      select(introduced) %>%
+      unnest(cols = introduced) %>%
+      select(tdwgCode) %>%
+      mutate(presence = 'introduced')
+    
+    # Extract native distribution and merge with introduced records
+    distribution <- res_powo %>%
+      select(natives) %>%
+      unnest(cols = natives) %>%
+      select(tdwgCode) %>%
+      mutate(presence = 'native') %>%
+      bind_rows(intro) %>%
+      rename(LEVEL3_COD = tdwgCode)
+  } else {
+    cat('\nNot introduced anywhere\n')  # Notify if no introduced records exist
+    
+    # Extract only native distribution
+    distribution <- res_powo %>%
+      select(natives) %>%
+      unnest(cols = natives) %>%
+      select(tdwgCode) %>%
+      mutate(presence = 'native') %>%
+      rename(LEVEL3_COD = tdwgCode)
+  }
+  
+  # Filter taxonomy data based on retrieved distribution
+  level3_cod <- distribution$LEVEL3_COD
+  
+  res_sf <- eu_taxonomy_final %>%
+    filter(ipni_id == x) %>%
+    cbind(tdwg, .) %>%
+    filter(LEVEL3_COD %in% level3_cod) %>%
+    left_join(., distribution)
+  
+  return(res_sf)
+}
+
+# Apply the function to all species except a specific one (593453-1)
+distr_res <- eu_taxonomy %>%
+  filter(ipni_id != '593453-1') %>%
+  pull(ipni_id) %>%
+  lapply(get_distribution)
+
+```
+
+### Join Species Distribution Data with GADM Administrative Borders
+
+```{r, fig.width=8, fig.height=11}
+eu_distr_df <- distr_res %>%
+  bind_rows() %>%          # Combine results into a single dataframe
+  distinct() %>%           # Remove duplicates
+  st_join(., borders)      # Spatial join with GADM borders
+
+# Plot species distribution using tmap
+tm_shape(borders) + 
+  tm_borders(col = 'gray80') + 
+  tm_shape(eu_distr_df) + 
+  tm_fill('presence') + 
+  tm_facets(by = 'species', ncols = 3)  # Facet by species, displaying 3 per row
+```
+
+### Plot Host Species Richness by Region
+```{r, fig.asp=0.5}
+eu_distr_df %>% 
+  #st_drop_geometry() %>%
+  group_by(LEVEL3_NAM, presence)%>%
+  summarise(rich = n_distinct(WFO_name)) %>%
+  tm_shape() +
+
+  tm_polygons('rich', col = 'white', fill.legend = tm_legend('Hosts Richness',
+                                          orientation = "landscape", 
+                                          frame = F),
+          fill.scale = tm_scale_intervals(values = '-viridis')) +
+  tm_facets(by = 'presence') +
+  tm_shape(World) + tm_borders() 
+```
+
+## Native extent
+
+Native distribution includes Australia, Indonesia and Papua New Guinea. Two species ( _E. ovata_ and _E. nova-angelica_) have expanded outside their native area.
+
+```{r, fig.asp=1}
+native_m <- distr_res %>%
+  bind_rows() %>%
+  select(WFO_name, LEVEL3_COD, presence) %>%
+  distinct() %>%
+  st_join(., borders) %>%    # Spatial join with borders
+  filter(presence == 'native') %>%
+  tally() %>%
+  st_buffer(dist = 0.1)      # Small buffer to correct geometries
+
+# Save native distribution to GeoPackage
+st_write(native_m, dsn = 'data/native_m.gpkg')
+
+# Plot native distribution
+qtm(native_m) + 
+  tm_layout(main.title = 'Native Distribution of Host Species')
+```
+
+### Summarize Native Distribution by Region
+```{r}
+native_distr <- eu_distr_df %>%
+  filter(presence== 'native') %>% group_by(WFO_name ,ISO2,  LEVEL3_COD) %>%
+  tally() %>% group_by(WFO_name ,ISO2) %>% 
+  summarise(tdwg = paste0(LEVEL3_COD, collapse = ","))
+
+native_distr
+
+left_join(native_distr,eu_taxonomy_final, by = 'WFO_name') %>%  st_drop_geometry() %>% write.csv(file = 'data/host_sdm/taxonomy_distribution_data.csv',row.names = F)
+```
+
+## Define the Projection Area for America
+
+```{r, fig.asp=1}
+# Filter relevant American regions
+america_m <- borders %>%
+  filter(continent == 'North America', UNREGION1 != 'Caribbean') %>%
+  filter(!NAME %in% c('Canada', 'Bermuda', 'Greenland',
+                      'Saint Pierre and Miquelon', 'Clipperton Island')) %>%
+  st_crop(y = c(xmin = -125, ymin = 5.51, xmax = -66.74, ymax = 50)) %>%
+  tally()
+
+# Generate background points for modeling
+st_sample(america_m, 10000) %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  write_csv('data/host_sdm/america_bg.csv')
+
+# Save American region to GeoPackage
+st_write(america_m, dsn = 'data/america_m.gpkg')
+
+# Plot projection area
+qtm(america_m) + 
+  tm_layout(main.title = 'Area to Project Modeled Distribution\n of Host Species')
+```
+
+## Select TDWG Areas for Each Species
+
+```{r}
+eu_tdwg <- eu_distr_df %>%
+  filter(presence== 'native') %>% group_by(WFO_name ,LEVEL3_COD) %>%
+  tally() %>% group_by(WFO_name ) %>% group_split() %>% 
+  lapply(pull,'LEVEL3_COD') %>% setNames(unique(native_distr$WFO_name ))
+
+```
+
+### Crop WorldClim for Training Data
+
+```{r}
+
+# Process each region in `eu_tdwg` and save as a multi-layer TIFF
+training <- lapply(seq_along(eu_tdwg), function(i) {
+  # Create a filename for the multi-layer TIFF for the current region
+  filename <- paste0('data/host_sdm/env/', names(eu_tdwg)[i], '.tif')
+  
+  # Create the mask for the current region
+  m <- tdwg %>%
+    filter(LEVEL3_COD %in% eu_tdwg[[i]]) %>%
+    sf::st_union() %>%
+    st_buffer(dist = 0.1) %>% 
+    vect()
+  
+  # Crop and mask each layer in `` and store them in a list
+  cropped_layers <- lapply(wc_2.5, function(layer) {
+    cropped <- crop(layer, m)
+    mask(cropped, m)
+  })
+  
+#  Stack all cropped and masked layers
+  stack_layers <- rast(cropped_layers)
+  
+  selected <- vifstep(stack_layers,th = 10,
+                   keep = 'temp_mean_annual') %>%
+  exclude(stack_layers, .)
+  
+
+  
+  # Write the stack as a multi-layer TIFF
+  writeRaster(selected, filename, overwrite = TRUE)
+  
+  cat(paste0(names(eu_tdwg)[i], ',',names(selected), '\n'),
+            file = 'data/host_sdm/env/selected_layers.csv',
+      append = T, sep = ',')
+})
+
+training
+
+
+```
+
+### Crop WorldClim for Native Range and America
+
+```{r}
+wc_2.5 %>% crop(.,vect(native_m), mask = T) %>% writeRaster(filename = 'data/wc/native.tif',overwrite=TRUE)
+
+wc_2.5 %>% crop(.,vect(america_m), mask = T) %>% writeRaster(filename = 'data/wc/america.tif',overwrite=TRUE)
+
+wc_native <- rast('data/wc/native.tif')
+wc_america <- rast('data/wc/america.tif')
+```
+
+### Get background points 
+
+```{r}
+
+# Use lapply to save each sample to a CSV with the corresponding name
+lapply(seq_along(eu_tdwg), function(i) {
+  bg <- tdwg %>%
+    filter(LEVEL3_COD %in% eu_tdwg[[i]]) %>%
+    sf::st_union() %>%
+    st_sample(10000) %>%
+    st_coordinates() %>%
+    as.data.frame() 
+  
+  # Write the sampled points to CSV, using the name of each `eu_tdwg` element
+  write.csv(bg, paste0('data/host_sdm/bg/', names(eu_tdwg)[i], '.csv'), row.names = FALSE)
+})
+
+```
+
+# Download species records from GBIF
+
+## GBIF download
+
+```{r}
+species_keys <- eu_taxonomy %>% pull(speciesKey)
+
+gbif_download <- occ_download(
+  type="and",
+  #Taxon Keys
+  pred_in("taxonKey", species_keys),
+  pred("hasCoordinate", TRUE), # con coordenadas
+  pred("hasGeospatialIssue", FALSE), # sin problemas espaciales
+  pred_gte("year", 1950),  # a partir de 1950
+  format = "SIMPLE_CSV")
+
+# Esperar a que esté lista (pueden ser hasta 30 minutos)
+occ_download_wait(gbif_download)
+```
+
+```{r}
+gbif_result <-   occ_download_import(key = '0008757-241107131044228')  %>% 
+  cc_dupl() %>% # duplicados
+  cc_cap()  %>% # capitales
+  cc_cen() %>% # centroides de países
+  cc_equ() %>% # coordenadas iguales (ejemplo: -1,-1)
+  cc_sea() %>% # en el mar
+  cc_val() %>% # coordenadas inválidas 
+  cc_zero() 
+```
+
+## Especies en México
+
+```{r, fig.asp=.75, fig.width=8}
+mx_speciesKey <- gbif_result %>%
+  filter(countryCode =='MX' & year >1990) %>%
+  group_by(speciesKey) %>% 
+  tally(sort = T) %>% pull(speciesKey)
+
+
+a<- gbif_result %>%
+  filter(countryCode =='MX')%>% mutate(color = if_else(year >=1990, 'forestgreen', 'gray90')) %>% mutate(species = species,8) %>%
+  group_by(species,year, color) %>% tally() %>%
+  ggplot(aes(x = year, y = n, fill = color)) + geom_col() +
+    geom_vline(xintercept = 1990, linetype = 2) + facet_wrap(.~species) +
+  scale_fill_identity() + labs(title = 'Registros de especies hospederas en México',
+                      subtitle = 'Sólo se tienen en cuenta especies con registros posteriores a 1990', x = 'Año', y = 'Número de registros')
+
+a +  theme_virix() 
+
+```
+
+## Guardar registros en América
+
+```{r}
+am_countrycode <- borders %>%
+  filter(continent == 'North America', UNREGION1 != 'Caribbean') %>% pull (ISO2)
+
+america_occ <- gbif_result %>%
+  filter(speciesKey %in% mx_speciesKey) %>%
+  filter(countryCode %in% am_countrycode) %>%
+  select(species, decimalLongitude, decimalLatitude) %>% arrange(species) %>%
+  rename(X = decimalLongitude, Y = decimalLatitude)
+
+america_names <- america_occ %>% pull(species) %>% unique()
+
+america_occ_list <-america_occ  %>% group_by(species) %>%
+  group_split()
+```
+
+## Guardar registros en área nativa
+
+```{r}
+australia_occ <- gbif_result %>%
+  filter(speciesKey %in% mx_speciesKey) %>%
+  filter(countryCode %in% c('AU', 'ID', 'PG') & establishmentMeans != 'introduced') %>%
+  select(species, decimalLongitude, decimalLatitude) %>% arrange(species) %>%
+  rename(X = decimalLongitude, Y = decimalLatitude)
+
+australia_names <- australia_occ %>% pull(species) %>% unique()
+
+australia_occ_list <-australia_occ  %>% group_by(species) %>%
+  group_split()
+```
+
+```{r}
+# Write each data frame in the list to a CSV file with the corresponding name
+for (i in seq_along(australia_occ_list)) {
+  write.csv(australia_occ_list[[i]], paste0('data/host_sdm/occ/', australia_names[i], ".csv"), row.names = FALSE)
+}
+
+for (i in seq_along(america_occ_list)) {
+  write.csv(america_occ_list[[i]], paste0('data/host_sdm/occ_america/', america_names[i], ".csv"), row.names = FALSE)
+}
+```
+
+# SDM Function
+
+```{r}
+wc_native <- rast('data/wc/native.tif')
+wc_america <- rast('data/wc/america.tif')
+
+wc_america_vif <- rast('data/wc/america.tif') %>%
+  vifstep(.,th = 10,
+          keep = 'temp_mean_annual') %>%
+  exclude(wc_america, .)
+
+
+library(usdm)
+library(RPushbullet)
+
+## Model at native, then transfer
+model_host<- function(sp_name){
+      
+      env <- rast(paste0('data/host_sdm/env/', sp_name, '.tif')) 
+        
+      # Preparar datos
+      
+      p <- thinData(coords = read.csv(paste0('data/host_sdm/occ/', 
+                                             sp_name, '.csv'))[,2:3],
+                    env = env,x = 'X',y = 'Y',verbose = F)
+      
+      bg <- read.csv(paste0('data/host_sdm/bg/', sp_name, '.csv'))
+      
+      data <- prepareSWD(species = sp_name,
+                         p = p,
+                         a = bg,
+                         env = env, verbose = F) 
+      
+      ## Separar datos
+      data_split <- trainValTest(x = data,test = 0.1,val = 0.1)
+      
+      train_default <- train(method = 'Maxent',data = data_split[[1]] )
+      
+      
+      # Fine tunning
+      
+      h <- list(fc = c('lp', 'lq','pq', 
+                       'lpq', 'lph', 'pqh', 'lpqh'),
+                reg = seq(0.5,1.5,.5))
+      
+      optimized <- gridSearch(train_default, 
+                              hypers = h, 
+                              metric = "aicc",
+                              env = env,
+                              test = data_split[3],
+                              save_models = F,
+                              interactive = F)
+      
+      index <- which.min(optimized@results$AICc)
+      
+      # Modelo final
+      final_model <- train("Maxent", 
+                           data = data_split[[1]], 
+                           fc = optimized@results[index, 1],
+                           reg = optimized@results[index, 2])
+      
+      # Proyectar en mapas 
+      proj_native <- terra::subset(wc_native,
+                                   names(env))
+      
+      proj_america <- terra::subset(wc_america,
+                                    names(env))
+      
+      
+      #Reporte
+      eval_data <- data.frame(species = sp_name,
+                         train = nrow(data_split[[1]]@coords),
+                         test = nrow(data_split[[2]]@coords),
+                         val = nrow(data_split[[3]]@coords),
+                         tss = tss(final_model, data_split[[2]]),
+                         auc = auc(final_model, data_split[[2]]),
+                         fc = optimized@results[index, 1],
+                         reg = optimized@results[index, 2],
+                         iter = optimized@results[index,3],
+                         vars = paste0(names(env),
+                                       collapse =', '),
+                         trained = 'native')
+      write.csv(eval_data,
+                file = paste0('data/host_sdm/eval/',sp_name, '_native_tr.csv'),
+                row.names = F)
+
+      folder_native <- paste0('data/host_sdm/SDMtune report/native/', sp_name)
+      folder_america <- paste0('data/host_sdm/SDMtune report/america/', sp_name)
+      
+      erase_and_rewrite <- function(folder_path) {
+        if (dir.exists(folder_path)) {
+          # Eliminar archivos dentro de la carpeta
+          files <- list.files(folder_path, full.names = TRUE, recursive = TRUE)
+          file.remove(files[file.info(files)$isdir == FALSE])
+          
+          # Eliminar subcarpetas después de los archivos
+          unlink(folder_path, recursive = TRUE, force = TRUE)
+          message('Previous report erased\n')
+          
+        }else{message('creating reports\n')}}
+      
+      folder_native <- paste0('data/host_sdm/SDMtune report/native/', sp_name)
+      folder <- paste0('data/host_sdm/SDMtune report/america/', sp_name)
+      
+      
+      erase_and_rewrite(folder_native)
+      SDMtune::modelReport(model = final_model,
+                           folder = folder_native,
+                           test = data_split[[2]],type = 'cloglog', 
+                           only_presence = T, 
+                           jk = T, 
+                           response_curves = T,clamp = F,
+                           env = proj_native,verbose = F)
+      
+      erase_and_rewrite(folder)
+      SDMtune::modelReport(model = final_model,
+                           folder = folder,
+                           test = data_split[[2]],type = 'cloglog',
+                           only_presence = T, 
+                           jk = T, 
+                           response_curves = T,clamp = F,
+                           env = proj_america,verbose = F)
+      
+      
+      ## Thresholds
+      ths <- thresholds(final_model, type = 'cloglog', test = data_split[[2]])
+      
+      ths_val <- ths %>% 
+        filter(Threshold == 'Minimum training presence') %>% 
+        pull('Cloglog value')
+      write.csv(ths,file = paste0("data/host_sdm/thresholds/", sp_name, '_native_tr.csv'))
+      #Binary
+      
+      ## america
+      predict(final_model, proj_america,  type = "cloglog", clamp = F) %>% 
+        plotPA(., colors = c('red', 'grey70'),ths_val, hr = F, overwrite = T, 
+               filename = paste0("data/host_sdm/binary/america/", sp_name, '_native_tr.tif')
+               )
+      
+      ## native
+      predict(final_model, proj_native,  type = "cloglog", clamp = F) %>% 
+        plotPA(., colors = c('red', 'grey70'),ths_val, hr = F, overwrite = T, 
+               filename = paste0("data/host_sdm/binary/native/", sp_name, '_native_tr.tif')
+               )
+
+      message(sp_name)
+      }
+
+## Model in America
+model_host_america<- function(sp_name){
+  
+  env <- wc_america_vif
+  
+  # Preparar datos
+  
+
+  p <- thinData(coords = read.csv(paste0('data/host_sdm/occ_america/', 
+                             sp_name, '.csv'))[,2:3],
+                env = env,x = 'X',y = 'Y',verbose = F)
+  bg <- read.csv('data/host_sdm/america_bg.csv')
+  
+  data <- prepareSWD(species = sp_name,
+                     p = p,
+                     a = bg,
+                     env = env, verbose = F) 
+  
+  ## Separar datos
+  data_split <- trainValTest(x = data,test = 0.1,val = 0.1)
+  
+  train_default <- train(method = 'Maxent',data = data_split[[1]] )
+  
+  
+  # Fine tunning
+  
+  h <- list(fc = c('lp', 'lq','pq', 
+                   'lpq', 'lph', 'pqh', 'lpqh'),
+            reg = seq(0.5,1.5,.5))
+  
+  optimized <- gridSearch(train_default, 
+                          hypers = h, 
+                          metric = "aicc",
+                          env = env,
+                          test = data_split[3],
+                          save_models = F,
+                          interactive = F)
+  
+  index <- which.min(optimized@results$AICc)
+  
+  # Modelo final
+  final_model <- train("Maxent", 
+                       data = data_split[[1]], 
+                       fc = optimized@results[index, 1],
+                       reg = optimized@results[index, 2])
+  
+  # Proyectar en mapas 
+  proj_native <- terra::subset(wc_native,
+                               names(env))
+  
+  proj_america <- terra::subset(wc_america,
+                                names(env))
+  
+  
+  #Reporte
+  eval_data <- data.frame(species = sp_name,
+                          train = nrow(data_split[[1]]@coords),
+                          test = nrow(data_split[[2]]@coords),
+                          val = nrow(data_split[[3]]@coords),
+                          tss = tss(final_model, data_split[[2]]),
+                          auc = auc(final_model, data_split[[2]]),
+                          fc = optimized@results[index, 1],
+                          reg = optimized@results[index, 2],
+                          iter = optimized@results[index,3],
+                          vars = paste0(names(env),
+                                        collapse =', '),
+                          trained = 'america')
+  write.csv(eval_data,
+          file = paste0('data/host_sdm/eval/',sp_name, '_america.csv'),
+          row.names = F)
+  
+  erase_and_rewrite <- function(folder_path) {
+    if (dir.exists(folder_path)) {
+      # Eliminar archivos dentro de la carpeta
+      files <- list.files(folder_path, full.names = TRUE, recursive = TRUE)
+      file.remove(files[file.info(files)$isdir == FALSE])
+      
+      # Eliminar subcarpetas después de los archivos
+      unlink(folder_path, recursive = TRUE, force = TRUE)
+      message('Previous report erased\n')
+      
+    }else{message('creating reports\n')}}
+  
+  folder_native <- paste0('data/host_sdm/SDMtune report america/native/', sp_name)
+  folder_america <- paste0('data/host_sdm/SDMtune report america/america/', sp_name)
+  
+  
+  erase_and_rewrite(folder_native)
+  SDMtune::modelReport(model = final_model,
+                       folder = folder_native,
+                       test = data_split[[2]],type = 'cloglog', 
+                       only_presence = T, 
+                       jk = T, 
+                       response_curves = T,clamp = F,
+                       env = proj_native,verbose = F)
+  
+  erase_and_rewrite(folder_america)
+  SDMtune::modelReport(model = final_model,
+                       folder = folder_america,
+                       test = data_split[[2]],type = 'cloglog',
+                       only_presence = T, 
+                       jk = T, 
+                       response_curves = T,clamp = F,
+                       env = proj_america,verbose = F)
+  
+  
+  ## Thresholds
+  ths <- thresholds(final_model, type = 'cloglog', test = data_split[[2]])
+  
+  ths_val <- ths %>% 
+    filter(Threshold == 'Minimum training presence') %>% 
+    pull('Cloglog value')
+  write.csv(ths,file = paste0("data/host_sdm/thresholds/", sp_name, '_america.csv'))
+  #Binary
+  
+  ## america
+  predict(final_model, proj_america,  type = "cloglog", clamp = F) %>% 
+    plotPA(., colors = c('red', 'grey70'),ths_val, hr = F, overwrite = T, 
+           filename = paste0("data/host_sdm/binary/america/", sp_name, '_america.tif')
+    )
+  
+  ## native
+  predict(final_model, proj_native,  type = "cloglog", clamp = F) %>% 
+    plotPA(., colors = c('red', 'grey70'),ths_val, hr = F, overwrite = T, 
+           filename = paste0("data/host_sdm/binary/native/", sp_name, '_america.tif')
+    )
+  
+  message(sp_name)
+}
+
+
+especies_names<- c("Corymbia citriodora",
+                   "Eucalyptus camaldulensis",
+                   "Eucalyptus cinerea",
+                   "Eucalyptus globulus",
+                   "Eucalyptus robusta")
+
+
+lapply(especies_names, model_host)
+lapply(especies_names, model_host_america)
+
+
+
+
+```
+
+## Visualizar datos
+
+```{r}
+list.dirs(path = '.', full.names = T, recursive = T) %>%
+  str_subset(pattern = 'eval') %>% 
+  lapply(., list.files, full.names = T) %>% lapply(., function(file_paths) {
+    lapply(file_paths, read.csv)
+  }) %>% lapply(., bind_rows)
+
+## Occurrence data
+
+### Native
+aus_occ <- list.files('data/host_sdm/occ', full.names = T) %>%
+  str_subset('citriodora|camaldulensis|cinerea|globulus|robusta') %>%
+  lapply(read.csv) %>% bind_rows() %>% 
+  st_as_sf(coords = c('X','Y'),crs = 'EPSG:4326')
+
+obs_rich_aus <- st_make_grid(x = aus_occ,cellsize = 2) %>% st_as_sf() %>%
+  rownames_to_column('ID') %>%
+  st_join(.,aus_occ) %>% na.omit() %>% group_by(ID) %>% 
+  summarise(rich = n_distinct(species)) 
+
+
+### America
+ame_occ <- list.files('data/host_sdm/occ_america', full.names = T) %>%
+  lapply(read.csv) %>% bind_rows()%>% 
+st_as_sf(coords = c('X','Y'),crs = 'EPSG:4326')
+
+obs_rich_ame <- st_make_grid(x = ame_occ,cellsize = 2) %>% st_as_sf() %>%
+  rownames_to_column('ID') %>%
+  st_join(.,ame_occ) %>% na.omit() %>% group_by(ID) %>% 
+  summarise(rich = n_distinct(species))
+```
+
+```{r, fig.height=8, fig.width=8}
+## Mapas
+## Australia Native trained
+native_tr_aus <- list.files(path = './data/host_sdm/binary/native', 
+           full.names = T, recursive = F) %>%
+  str_subset(pattern = 'america',negate = T) %>% 
+  rast()
+
+
+## Australia America trained
+america_tr_aus <- list.files(path = './data/host_sdm/binary/native', 
+                            full.names = T, recursive = F) %>%
+  str_subset(pattern = 'america',negate = F) %>% 
+  rast() 
+
+## America Native trained
+native_tr_ame <- list.files(path = './data/host_sdm/binary/america', 
+                            full.names = T, recursive = F) %>%
+  str_subset(pattern = '_america',negate = T) %>% 
+  rast()
+
+
+## America America trained
+america_tr_ame <- list.files(path = './data/host_sdm/binary/america', 
+                             full.names = T, recursive = F) %>%
+  str_subset(pattern = '_america',negate = F) %>% 
+  rast()
+```
+
+## Plot
+
+```{r, fig.height=8, fig.width=8}
+
+tm1 <- app(native_tr_aus, sum) %>% 
+  tm_shape(.) + 
+  tm_raster(col.legend = tm_legend('Trained in native range',
+                                   orientation = "landscape", 
+                                   position = tm_pos_in(pos.v = 'BOTTOM'),
+                                   frame = F),
+            col.scale = tm_scale_continuous(values = '-viridis',limits = c(1,5))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) +
+  tm_legend(title.size = 1.5)
+
+tm_layout(main.title = ,legend.position = )
+
+tm2 <- app(america_tr_aus, sum) %>% 
+  tm_shape(.) + 
+  tm_raster(col.legend = tm_legend('Trained in invaded range then \ntransfered to native',
+                                   orientation = "landscape", 
+                                   position = tm_pos_in(pos.v = 'BOTTOM'),
+                                   frame = F),
+            col.scale = tm_scale_continuous(values = '-viridis',limits = c(1,5))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) +
+  tm_legend(title.size = 1.5)
+
+
+tm3 <- app(native_tr_ame, sum) %>% 
+  tm_shape(.) + 
+  tm_raster(col.legend = tm_legend('Trained in native range then \ntransfered to invaded',
+                                   orientation = "landscape", 
+                                   position = tm_pos_in(pos.v= 'BOTTOM'),
+                                   frame = F),
+            col.scale = tm_scale_continuous(values = '-viridis',limits = c(1,5))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) +
+  tm_legend(title.size = 1.5)
+
+
+tm4 <- app(america_tr_ame, sum) %>% 
+  tm_shape(.) + 
+  tm_raster(col.legend = tm_legend('Trained in invaded range',
+                                   orientation = "landscape", 
+                                   position = tm_pos_in(pos.v= 'BOTTOM'),
+                                   frame = F),
+            col.scale = tm_scale_continuous(values = '-viridis',limits = c(1,5))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) +
+  tm_legend(title.size = 1.5)
+
+
+tm5 <- tm_shape(obs_rich_aus,bbox = st_bbox(native_tr_aus)) + 
+  tm_fill('rich', fill.legend = tm_legend('Observed in native range',
+                                          orientation = "landscape", 
+                                          position = tm_pos_in(pos.v= 'BOTTOM'),
+                                          frame = F),
+          fill.scale = tm_scale_continuous(values = '-viridis',limits = c(1,5))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) +
+  tm_legend(title.size = 1.5)
+
+tm6 <- tm_shape(obs_rich_ame,bbox = st_bbox(native_tr_ame)) +
+  tm_fill('rich', fill.legend = tm_legend('Observed in invaded range',
+                                          orientation = "landscape", 
+                                          position = tm_pos_in(pos.v= 'BOTTOM'),
+                                          frame = F),
+          fill.scale = tm_scale_continuous(values = '-viridis',limits = c(1,5))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) +
+  tm_legend(title.size = 1.5)
+
+#pdf(file = 'host_sdm_comparison_thin.pdf',width = 8,height = 8)
+tmap_arrange(tm1, tm2, tm5, tm3, tm4, tm6,ncol = 3, asp = 0.65) 
+#dev.off()
+```
+
+# Save
+
+```{r}
+app(native_tr_aus, sum) %>% writeRaster(filename = 'data/host_sdm/richness/aus_native_tr.tiff', overwrite=TRUE)
+
+app(america_tr_aus, sum) %>% writeRaster(filename = 'data/host_sdm/richness/aus_america_tr.tiff', overwrite=TRUE)
+
+app(native_tr_ame, sum) %>% writeRaster(filename = 'data/host_sdm/richness/america_native_tr.tiff', overwrite=TRUE)
+
+app(america_tr_ame, sum) %>% writeRaster(filename = 'data/host_sdm/richness/america_america_tr.tiff', overwrite=TRUE)
+```
+
+#diferencias
+
+```{r, fig.asp=0.6}
+aus_rich <- app(native_tr_aus, sum) %>% 
+  tm_shape(.) + 
+  tm_raster(col.legend = tm_legend('Predicted Richness',
+                                   orientation = "landscape", 
+                                   frame = F, position = c('center', 'BOTTOM')),
+            col.scale = tm_scale_categorical(values = 'greys',
+                                             levels = seq(1,6))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) +
+  tm_legend(title.size = 1.5)
+
+ame_rich <- app(america_tr_ame, sum) %>% 
+  tm_shape(.) + 
+  tm_raster(col.legend = tm_legend('Predicted Richness',
+                                  orientation = "landscape", 
+                                   frame = F, position = c('center', 'BOTTOM')),
+            col.scale = tm_scale_categorical(values = 'greys',
+                                             levels = seq(1,6))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) +
+  tm_legend(title.size = 1.5)
+
+
+
+
+WIDTH = 200
+host_rich <- tmap_arrange(ame_rich, aus_rich, ncol = 2, asp = 0.8) 
+
+host_rich
+
+tmap_save(host_rich, filename = 'figs/host_rich.tiff',
+          width = WIDTH, height = WIDTH*.6, units = 'mm',dpi = 300)
+
+
+```

@@ -1,0 +1,574 @@
+---
+title: "Modelando a _Phoracantha recurva_"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+# librerías
+```{r}
+library(tidyverse)
+library(rgbif)
+library(sf)
+library(terra)
+library(tmap)
+library(rgbif)
+library(CoordinateCleaner)
+library(ggplot2)
+library(SDMtune)
+library(geodata)
+library(usdm)
+source('C:/Users/USER/OneDrive - UNIVERSIDAD NACIONAL AUTÓNOMA DE MÉXICO/R projects/theme_virix.r')
+sf_use_s2(use_s2 = F)
+
+```
+
+## Datos
+### División política
+```{r}
+borders <- read_rds(file = 'data/gadm/gadm36_adm0_r3_pk.rds') %>% terra::unwrap() %>% st_as_sf() %>% select(NAME_0) %>% rename(NAME = NAME_0) %>%
+  left_join(country_codes()) %>% select(NAME:ISO2, UNREGION1:continent)
+
+native_m <- st_read('data/native_m.gpkg')
+america_m <- st_read('data/america_m.gpkg')
+```
+
+### World Clim
+
+```{r}
+wc_native <- rast('data/wc/native.tif')
+wc_america <- rast('data/wc/america.tif')
+  
+wc_america_vif<-  vifstep(wc_america, 10) %>% exclude(wc_america, .)
+wc_native_vif<-  vifstep(wc_native, 10) %>% exclude(wc_america, .)
+
+```
+
+### Background points
+```{r}
+
+native_m %>% st_sample(as.integer(ncell(wc_native[[1]])*.1)) %>%
+  st_coordinates() %>% as.data.frame() %>%
+  write.csv('data/sdm/bg/native_tr.csv', row.names = F)
+
+america_m %>% st_sample(as.integer(ncell(wc_native[[1]])*.1)) %>%
+  st_coordinates() %>% as.data.frame() %>%
+  write.csv('data/sdm/bg/america_tr.csv', row.names = F)
+```
+# Registros de las especies
+
+## GBIF download
+```{r}
+species_keys <- name_backbone('Phoracantha recurva') %>%
+  pull(speciesKey)
+
+gbif_download <- occ_download(
+  type="and",
+  #Taxon Keys
+  pred_in("taxonKey", species_keys),
+  pred("hasCoordinate", TRUE), # con coordenadas
+  pred("hasGeospatialIssue", FALSE), # sin problemas espaciales
+  pred_gte("year", 1970),  # a partir de 1950
+  format = "SIMPLE_CSV")
+
+# Esperar a que esté lista (pueden ser hasta 30 minutos)
+occ_download_wait(gbif_download)
+```
+
+
+```{r}
+gbif_result <- occ_download_import(key = '0017365-241107131044228') %>%
+  cc_dupl() %>% # duplicados
+  cc_cap()  %>% # capitales
+  cc_cen() %>% # centroides de países
+  cc_equ() %>% # coordenadas iguales (ejemplo: -1,-1)
+  cc_sea() %>% # en el mar
+  cc_val() %>% # coordenadas inválidas 
+  cc_zero() %>% mutate(origin = 'GBIF')
+
+```
+## Unir con datos nuestros
+```{r}
+
+clean_db <- read.csv('data/field.csv') %>%
+  mutate(origin = 'Specimen') %>%
+  bind_rows(gbif_result) %>% cc_dupl() %>%
+  filter(stateProvince != 'Hawaii')
+```
+
+
+
+## Visualizar datos en América
+```{r, fig.asp=.43, fig.width=8}
+
+a<- clean_db %>%
+  filter(countryCode %in% c('US', 'MX')) %>%
+  group_by(countryCode, year, origin) %>% 
+  tally(sort = T) %>%
+  ggplot(aes(x = year, y = n, fill = origin)) +
+  geom_col() +
+  facet_wrap(.~countryCode) +
+  labs(x = 'Year', y = 'Localities') +
+  coord_cartesian(expand = F)
+
+occ_barplot <-a +  theme_virix() +scale_fill_manual(values = c('grey30', 'grey70')) +
+  labs(fill = 'Data Origin') + theme(legend.position = 'right')
+
+occ_barplot
+
+ggsave(filename = 'figs/registros.tiff',plot = occ_barplot,width = WIDTH, height = WIDTH/3,units = 'mm',dpi = 150,bg = 'white')
+```
+### Mapa
+```{r, fig.asp=1, fig.width=8}
+df_db <- st_as_sf(x = clean_db, 
+                  coords = c('decimalLongitude', 'decimalLatitude')) %>%
+  filter(countryCode %in% c('US', 'MX')) 
+  
+
+
+
+
+locs_plot <- tm_shape(borders, bbox = st_bbox(wc_america)) +
+  tm_fill('grey90') +  
+  tm_borders(col = 'grey70') +
+  tm_shape(df_db) + 
+  tm_dots(fill = 'origin', size = 0.4, fill_alpha = 0.5, 
+          fill.scale = tm_scale(values = c('darkolivegreen4', 'grey30')), 
+          fill.legend = tm_legend("Origen de los datos",
+                                  orientation = "portrait", 
+                                  position = tm_pos_in(pos.v = 'BOTTOM'),
+                                  frame = FALSE)) +
+  tm_layout(frame = TRUE, asp = 1) 
+
+locs_plot
+
+tmap_save(locs_plot, filename = 'figs/locs_plot.tiff',width = 200, height = 200, units = 'mm',dpi = 150)
+```
+
+
+
+## Guardar registros en América
+```{r}
+america_occ <- clean_db %>%
+  filter(countryCode %in% am_countrycode) %>%
+  select(decimalLongitude, decimalLatitude) %>% 
+  rename(X = decimalLongitude, Y = decimalLatitude)
+
+write.csv(america_occ,file = 'data/sdm/occ/america_tr.csv',row.names = F)
+```
+
+
+## Guardar registros en área nativa
+```{r}
+australia_occ <- clean_db %>%
+  filter(countryCode =='AU' & establishmentMeans != 'introduced') %>%
+  select(decimalLongitude, decimalLatitude) %>% 
+  filter(decimalLatitude<=154,) %>%
+  rename(X = decimalLongitude, Y = decimalLatitude)
+write.csv(australia_occ,file = 'data/sdm/occ/native_tr.csv',row.names = F)
+```
+
+
+# Modelado de distribución
+
+## Training en nativa
+
+```{r}
+name_tr <- 'america_tr'
+rast_training <- wc_america
+rast_transfer <- wc_native
+
+host_aus <- rast('data/host_sdm/richness/aus_native_tr.tiff')
+host_ame <- rast('data/host_sdm/richness/america_america_tr.tiff')
+
+model_beetle<- function(rast_training, rast_transfer, name_tr){
+      if(name_tr =='america_tr'){
+        host_training <- host_ame
+        host_transfer <- host_aus}else{
+          host_training <- host_aus
+          host_transfer <- host_ame}    
+  
+      env <- vifstep(rast_training, 10) %>% exclude(rast_training, .)
+      env <- c(env, host_training)
+      
+      env_transfer <- c(rast_transfer, host_transfer) %>% subset(., names(env))
+      
+      # Preparar datos
+      data <- prepareSWD(species = name_tr,
+                         p = thinData(coords =
+                                        read.csv(paste0('data/sdm/occ/',
+                                                        name_tr, '.csv')),
+                                      x = 'X', y = 'Y', env = env),
+                         a = read.csv(paste0('data/sdm/bg/',
+                                             name_tr, '.csv')),
+                         env = env, verbose = F) 
+        
+      ## Separar datos
+      data_split <- trainValTest(x = data,test = 0.15)
+      
+      train_default <- train(method = 'Maxent',data = data_split[[1]] )
+      
+
+      # Fine tunning
+      
+      h <- list(fc = c('lp', 'lq','pq', 
+                       'lpq', 'lph', 'pqh', 'lpqh'),
+                reg = seq(1,3,.5))
+      
+      optimized <- gridSearch(train_default, 
+                             hypers = h, 
+                             metric = "aicc",
+                             env = env,
+                             test = data_split[3],
+                             save_models = F,
+                             interactive = F)
+      
+      index <- which.min(optimized@results$AICc)
+      
+      # Modelo final
+      final_model <- train("Maxent", 
+                           data = data_split[[1]], 
+                           fc = optimized@results[index, 1],
+                           reg = optimized@results[index, 2])
+      
+      # Proyectar en mapas 
+      env_transfer <- c(rast_transfer, host_transfer) %>% terra::subset(.,
+                                   names(env)) 
+      
+      #Reporte
+      eval_data <- data.frame(species = 'Phoracantha',
+                              train = sum(data_split[[1]]@pa == 1),
+                              test = sum(data_split[[2]]@pa == 1),
+                         tss = tss(final_model, data_split[[2]]),
+                         auc = auc(final_model, data_split[[2]]),
+                         fc = optimized@results[index, 1],
+                         reg = optimized@results[index, 2],
+                         iter = optimized@results[index,3],
+                         vars = paste0(names(env),
+                                       collapse =', '),
+                         trained = name_tr)
+      write.csv(eval_data,
+                file = paste0('data/sdm/eval/',name_tr, '.csv'),
+                row.names = F)
+      
+      erase_and_rewrite <- function(folder_path) {
+        if (dir.exists(folder_path)) {
+          # Eliminar archivos dentro de la carpeta
+          files <- list.files(folder_path, full.names = TRUE, recursive = TRUE)
+          file.remove(files[file.info(files)$isdir == FALSE])
+          
+          # Eliminar subcarpetas después de los archivos
+          unlink(folder_path, recursive = TRUE, force = TRUE)
+          message('Previous report erased\n')
+          
+        }else{message('creating reports\n')}}
+      
+      folder_transfered <- paste0('data/sdm/',name_tr, '_transfered' )
+      folder <- paste0('data/sdm/',name_tr)
+      
+      # Reporte training
+      erase_and_rewrite(folder)
+
+      SDMtune::modelReport(model = final_model,
+                           folder = folder,
+                           test = data_split[[2]],type = 'cloglog', only_presence = T, 
+                           jk = T, 
+                           response_curves = T,clamp = F,
+                           env = env,verbose = F)
+      
+      erase_and_rewrite(folder_transfered)
+      SDMtune::modelReport(model = final_model,
+                           folder = folder_transfered,
+                           test = data_split[[2]],type = 'cloglog', only_presence = T, 
+                           jk = T, 
+                           response_curves = T,clamp = F,
+                           env = env_transfer,verbose = F)
+      
+      
+      ## Thresholds
+      ths <- thresholds(final_model, type = 'cloglog', test = data_split[[2]])
+      
+      ths_val <- ths %>% 
+        filter(Threshold == 'Maximum training sensitivity plus specificity') %>% 
+        pull('Cloglog value')
+      write.csv(ths,file = paste0("data/sdm/thresholds/", name_tr, '.csv'))
+      #Binary
+      
+      ## training
+      predict(final_model, env,  type = "cloglog", clamp = F) %>% 
+        plotPA(., colors = c('red', 'grey70'),ths_val, hr = F, overwrite = T, 
+               filename = paste0("data/sdm/binary/", name_tr, '.tif')
+               )
+      
+      ## transfer
+      predict(final_model, env_transfer,  type = "cloglog", clamp = F) %>% 
+        plotPA(., colors = c('red', 'grey70'),ths_val, hr = F, overwrite = T, 
+               filename = paste0("data/sdm/binary/", name_tr, '_transfered.tif')
+               )
+      
+      varImp(final_model) %>%
+        write.csv(file = paste0("data/sdm/VarImp/", name_tr, '.csv'))
+
+      message(name_tr)
+      }
+
+
+model_beetle(wc_america, wc_native, 'america_tr')
+model_beetle(wc_native, wc_america, 'native_tr')
+
+pbPost(type = 'note',title = 'acabó R', body = 'revisa los resultados')
+```
+
+## Visualizar datos
+```{r}
+list.dirs(path = '.', full.names = T, recursive = T) %>%
+  str_subset(pattern = 'eval') %>% 
+  lapply(., list.files, full.names = T) %>% lapply(., function(file_paths) {
+    lapply(file_paths, read.csv)
+  }) %>% lapply(., bind_rows)
+
+## Occurrence data
+
+### Native
+aus_occ <- read.csv('data/sdm/occ/native_tr.csv') %>% bind_rows() %>% 
+  rownames_to_column('ID_obs') %>%
+  st_as_sf(coords = c('X','Y'),crs = 'EPSG:4326') 
+
+obs_rich_aus <- st_make_grid(x = aus_occ,cellsize = 1) %>% st_as_sf() %>%
+  rownames_to_column('ID') %>%
+  st_join(.,aus_occ) %>% na.omit() %>% group_by(ID) %>% 
+  summarise(obs = n_distinct(ID_obs)) 
+
+
+### America
+ame_occ <- read.csv('data/sdm/occ/america_tr.csv') %>% 
+  rownames_to_column('ID_obs') %>%
+  st_as_sf(coords = c('X','Y'),crs = 'EPSG:4326') 
+
+obs_rich_ame <- st_make_grid(x = ame_occ,cellsize = 1) %>% st_as_sf() %>%
+rownames_to_column('ID') %>%
+  st_join(.,ame_occ) %>% na.omit() %>% group_by(ID) %>% 
+  summarise(obs = n_distinct(ID_obs)) 
+```
+
+## Load
+```{r, fig.height=8, fig.width=8}
+## Mapas
+
+binary <- list.files(path = './data/sdm/binary', 
+           full.names = T, recursive = F) %>% lapply(rast)
+## Australia Native trained
+
+native_tr_aus <- binary[[3]]
+
+## Australia America trained
+america_tr_aus <- binary[[2]]
+
+## America Native trained
+native_tr_ame <-  binary[[4]]
+
+
+## America America trained
+america_tr_ame <-binary[[1]]
+```
+
+
+# Plots
+## Tamaño
+```{r}
+WIDTH = 174
+```
+
+
+```{r, fig.height=8, fig.width=8}
+## Plot
+tm1 <- tm_shape(native_tr_aus) + 
+  tm_raster(col.legend = tm_legend('Trained in native range',
+                                   orientation = "landscape", 
+                                   position = tm_pos_in(pos.v = 'BOTTOM'),
+                                   frame = F),
+            col.scale = tm_scale_discrete(values = c('grey90', 'grey20'),ticks = c(0,1),
+                                          labels = c('not predicted', 'predicted'))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) 
+    
+
+
+tm2 <- tm_shape(america_tr_aus) + 
+  tm_raster(col.legend = tm_legend('Trained in invaded range,\ntransfered to native',
+                                   orientation = "landscape", 
+                                   position = tm_pos_in(pos.v = 'BOTTOM'),
+                                   frame = F),
+            col.scale = tm_scale_discrete(values = c('grey90', 'grey20'),ticks = c(0,1),
+                                          labels = c('not predicted', 'predicted'))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) 
+    
+  
+
+
+tm3 <- tm_shape(native_tr_ame) + 
+  tm_raster(col.legend = tm_legend('Trained in native range,\ntransfered to invaded',
+                                   orientation = "landscape", 
+                                   position = tm_pos_in(pos.v = 'BOTTOM'),
+                                   frame = F),
+            col.scale = tm_scale_discrete(values = c('grey90', 'grey20'),ticks = c(0,1),
+                                          labels = c('not predicted', 'predicted'))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) 
+
+
+tm4 <- tm_shape(america_tr_ame) + 
+  tm_raster(col.legend = tm_legend('Trained in invaded range',
+                                   orientation = "landscape", 
+                                   position = tm_pos_in(pos.v = 'BOTTOM'),
+                                   frame = F),
+            col.scale = tm_scale_discrete(values = c('grey90', 'grey20'),ticks = c(0,1),
+                                          labels = c('not predicted', 'predicted'))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) 
+    
+
+
+tm5 <- tm_shape(obs_rich_aus, st_bbox(binary[[3]])) +
+  tm_polygons('obs',
+              fill.legend = tm_legend(title = 'Records in native range',
+                                          orientation = "landscape", 
+                                          position = tm_pos_in( pos.v = 'BOTTOM'),
+                                          frame = F),
+          fill.scale = tm_scale_continuous(values = c('grey90', 'grey20'))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) 
+
+tm6 <- tm_shape(obs_rich_ame, st_bbox(binary[[1]])) + 
+  tm_polygons('obs', fill.legend = tm_legend('Records in invaded range',
+                                          orientation = "landscape", 
+                                          position = tm_pos_in(pos.v= 'BOTTOM'),
+                                          frame = F),
+          fill.scale = tm_scale_continuous(values = c('grey90', 'grey20'))) +
+  tm_shape(borders) + tm_borders(col = 'grey70')+
+  tm_layout(frame = T) 
+
+
+#pdf(file = 'sdm_comparison_host.pdf',width = 10,height = 8)
+tmap_arrange(tm1, tm2,  tm3, tm4, ncol = 2, asp = 1)
+#dev.off()
+```
+
+
+## Comparar trainings
+```{r, fig.asp=1}
+a <- as.polygons(native_tr_aus) %>% st_as_sf() %>% 
+  filter(lyr1 ==1) %>% mutate(train = 'Native')
+
+aus_sf <- as.polygons(america_tr_aus) %>% st_as_sf() %>% 
+  filter(lyr1 ==1) %>% mutate(train = 'Invaded') %>%
+  bind_rows(a, .)
+
+aa <- as.polygons(america_tr_ame) %>% st_as_sf() %>% 
+  filter(lyr1 ==1) %>% mutate(train = 'Invaded')
+
+ame_sf <- as.polygons(native_tr_ame) %>% st_as_sf() %>% 
+  filter(lyr1 ==1) %>% mutate(train = 'Native') %>%
+  bind_rows(aa, .)
+```
+
+
+```{r, fig.asp=1}
+tr_compare <- tm_shape(borders, bbox = st_bbox(ame_sf)) +
+  tm_fill('white')+ tm_borders(col = 'grey70') +
+tm_shape(ame_sf) +
+  # SDM
+  tm_fill("train", fill_alpha = 0.5, 
+          fill.scale = tm_scale(values = c('black', 'grey60' )), 
+          fill.legend = tm_legend(title = "Training area")) +  
+  #OCC
+  tm_shape(df_db) + 
+  tm_bubbles(fill = 'origin', size = 0.15, fill_alpha = 0.75, col = NA,
+          fill.scale = tm_scale(values = c( 'black', 'grey90')), 
+          fill.legend = tm_legend("Data Origin"))+
+
+  tm_layout(frame = TRUE, legend.position = c("left", "bottom"),
+            legend.text.size = 0.5, legend.title.size = 0.7,
+            legend.frame = F, asp = 1)  # Corrección en la posición de la leyenda
+
+
+   tr_compare 
+
+tmap_save(tr_compare, filename = 'figs/compare_trained.tiff',
+          width = WIDTH, height = WIDTH, units = 'mm',dpi = 300)
+```
+
+## Mapa de área nativa
+```{r}
+tr_compare2 <- tm_shape(borders, bbox = st_bbox(aus_sf)) +
+  tm_fill('white')+ tm_borders(col = 'grey70') +
+tm_shape(aus_sf) +
+  # SDM
+  tm_fill("train", fill_alpha = 0.5, 
+          fill.scale = tm_scale(values = c('black', 'grey60' )), 
+          fill.legend = tm_legend(title = "Training area")) +  
+  #OCC
+  tm_shape(aus_occ) + 
+  tm_bubbles(fill = 'black', size = 0.2, fill_alpha = 0.75, col = NA)+
+  tm_layout(frame = TRUE, legend.position = c("left", "bottom"), 
+            legend.text.size = 0.5, legend.title.size = 0.7,
+            legend.frame = F, asp = 1)  # Corrección en la posición de la leyenda
+
+	
+tr_compare2
+tmap_save(tr_compare2, filename = 'figs/compare_trained2.tiff',
+          width = WIDTH, height = WIDTH, units = 'mm',dpi = 300)
+```
+
+```{r}
+
+
+comp_sdm <- tmap_arrange(tr_compare,tr_compare2, ncol = 2, asp = 0.8) 
+
+comp_sdm
+
+tmap_save(comp_sdm, filename = 'figs/comp_sdm.tiff',
+          width = WIDTH, height = WIDTH*.6, units = 'mm',dpi = 300)
+```
+
+## VarImp
+```{r, fig.asp=0.3}
+varimp_plot <-  read.csv('data/sdm/VarImp/america_tr_ESP.csv',encoding = 'Latin') %>%
+  arrange(Importancia) %>%
+  mutate(Variable = fct_inorder(Variable),
+         Importancia = if_else(tr == 'Invadida', -Importancia, Importancia)) %>%
+  ggplot( aes(x = Importancia, y = Variable, fill = tr)) +
+  geom_col() +
+  scale_x_continuous(labels = abs) +
+  scale_fill_manual(values = c('black', 'grey50'))+
+  theme_virix() + #facet_grid(.~tr)+
+
+  labs(x = '% de Contribución',
+       y = NULL,
+       fill = 'Área de\n entrenamiento') +
+  theme(legend.position = 'right')
+
+varimp_plot
+ggsave(filename = 'figs/varimp_plot.tiff',plot = varimp_plot,width = WIDTH, height = WIDTH/3,units = 'mm',dpi = 300,bg = 'white')
+```
+
+
+```{r, fig.asp=0.3}
+varimp_plot <-  read.csv('data/sdm/VarImp/varimp_ENG.csv') %>%
+  arrange(Permutation_importance) %>%
+  mutate(Variable = fct_inorder(Variable),
+         Permutation_importance = if_else(tr == 'Invaded', -Permutation_importance, Permutation_importance)) %>%
+  ggplot( aes(x = Permutation_importance, y = Variable, fill = tr)) +
+  geom_col() +
+  scale_x_continuous(labels = abs) +
+  scale_fill_manual(values = c('grey30', 'grey70'))+
+  theme_virix() + #facet_grid(.~tr)+
+
+  labs(x = '% Variable importance',
+       y = NULL,
+       fill = 'Training area') +
+  theme(legend.position = 'right')
+
+varimp_plot
+ggsave(filename = 'figs/varimp_plot_BW.tiff',plot = varimp_plot,width = WIDTH, height = WIDTH/3,units = 'mm',dpi = 300,bg = 'white')
+```
