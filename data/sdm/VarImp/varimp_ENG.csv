@@ -1,0 +1,15 @@
+Variable,Permutation_importance,sd,tr
+Host species richness,64.9,0.024,Invaded
+Precipitation of Driest Month,11.9,0.008,Invaded
+Precipitation of Wettest Month,9,0.007,Invaded
+Precipitation Seasonality,6.7,0.003,Invaded
+Temperature Annual Range,3.1,0.002,Invaded
+Mean Temperature of Warmest Quarter,2.6,0.001,Invaded
+Mean Diurnal Temperature Range,1.8,0.001,Invaded
+Host species richness,44.5,0.011,Native
+Precipitation Seasonality,24,0.015,Native
+Mean Diurnal Temperature Range,13.7,0.007,Native
+Precipitation of Driest Month,10.6,0.01,Native
+Isothermality,3.2,0.006,Native
+Annual Mean Temperature,2.1,0.002,Native
+Precipitation of Wettest Month,1.8,0.004,Native
