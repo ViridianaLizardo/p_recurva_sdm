@@ -1,0 +1,15 @@
+Variable,Importancia,sd,tr
+Riqueza de especies hospederas,64.9,0.024,Invadida
+Precipitación del mes más seco,11.9,0.008,Invadida
+Precipitación del mes más húmedo,9,0.007,Invadida
+Estacionalidad de Precipitación,6.7,0.003,Invadida
+Rango anual de Temperatura,3.1,0.002,Invadida
+Temperatura media del mes más cálido,2.6,0.001,Invadida
+Rango diurno de Temperatura,1.8,0.001,Invadida
+Riqueza de especies hospederas,44.5,0.011,Nativa
+Estacionalidad de Precipitación,24,0.015,Nativa
+Rango diurno de Temperatura,13.7,0.007,Nativa
+Precipitación ddel mes más seco,10.6,0.01,Nativa
+Isotermalidad,3.2,0.006,Nativa
+Temperatura media anual,2.1,0.002,Nativa
+Precipitación del mes más húmedo,1.8,0.004,Nativa

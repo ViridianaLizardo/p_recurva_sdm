@@ -1,0 +1,8 @@
+,Variable,Permutation_importance,sd
+1,Riqueza de especies hospederas,44.5,0.011
+2,Estacionalidad de Precipitación,24,0.015
+3,Rango diurno de Temperatura,13.7,0.007
+4,Precipitación ddel mes más seco,10.6,0.01
+5,Isotermalidad,3.2,0.006
+6,Temperatura media anual,2.1,0.002
+7,Precipitación del mes más húmedo,1.8,0.004

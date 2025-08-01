@@ -1,0 +1,8 @@
+"","Variable","Permutation_importance","sd"
+"1","pp_seasonality",33.6,0.023
+"2","sum",22.5,0.012
+"3","pp_driest_m",17.3,0.018
+"4","pp_wettest_m",15.3,0.008
+"5","temp_range_diurnal",5.6,0.005
+"6","temp_isothermality",3.2,0.007
+"7","temp_mean_annual",2.4,0.004
