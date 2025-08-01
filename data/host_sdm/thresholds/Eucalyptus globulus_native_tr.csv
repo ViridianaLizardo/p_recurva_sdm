@@ -1,0 +1,6 @@
+"","Threshold","Cloglog value","Fractional predicted area","Training omission rate","Test omission rate","P-values"
+"1","Minimum training presence",0.000673701455358611,0.95394581861013,0,0,6.32783714065954e-36
+"2","Equal training sensitivity and specificity",0.544636389507727,0.255948174322733,0.256,0.0418848167539267,0
+"3","Maximum training sensitivity plus specificity",0.358290430003171,0.367255594817432,0.0928,0.0139616055846422,0
+"4","Equal test sensitivity and specificity",0.5120998221898,0.275500588928151,0.2224,0.0349040139616056,0
+"5","Maximum test sensitivity plus specificity",0.321069975796417,0.395759717314488,0.08,0.00930773705642816,0
