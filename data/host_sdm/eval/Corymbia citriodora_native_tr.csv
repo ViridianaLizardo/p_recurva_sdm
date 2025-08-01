@@ -1,0 +1,2 @@
+"species","train","test","tss","auc","fc","reg","iter","vars","trained"
+"Corymbia citriodora",858,152,0.810350877192982,0.954973684210526,"lpqh",1.5,500,"pp_driest_m, pp_seasonality, temp_isothermality, temp_mean_annual, temp_range_diurnal","native"

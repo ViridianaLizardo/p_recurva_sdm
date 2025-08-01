@@ -1,0 +1,2 @@
+"species","train","test","tss","auc","fc","reg","iter","vars","trained"
+"Eucalyptus camaldulensis",5522,974,0.705907292061922,0.922621583451254,"lpqh",0.5,500,"pp_annual, pp_driest_m, pp_seasonality, temp_isothermality, temp_mean_annual, temp_range_diurnal","native"

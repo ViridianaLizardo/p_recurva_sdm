@@ -1,0 +1,2 @@
+"species","train","test","tss","auc","fc","reg","iter","vars","trained"
+"Eucalyptus robusta",696,123,0.934943089430894,0.985208672086721,"lpq",0.5,500,"pp_driest_m, pp_seasonality, temp_isothermality, temp_mean_annual, temp_range_diurnal","native"
