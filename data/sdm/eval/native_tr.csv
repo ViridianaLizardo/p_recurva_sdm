@@ -1,0 +1,2 @@
+"species","train","test","tss","auc","fc","reg","iter","vars","trained"
+"Phoracantha",142,25,0.648077654620581,0.877051223191447,"lpq",1,500,"pp_driest_m, pp_seasonality, pp_wettest_m, temp_isothermality, temp_mean_annual, temp_range_diurnal, sum","native_tr"
